@@ -5,9 +5,12 @@ from email.utils import parseaddr
 from hashlib import sha256
 from pathlib import Path
 from secrets import compare_digest
+from threading import Lock
+from time import monotonic
 from typing import Annotated, Literal
 from uuid import uuid4
 
+import json
 import os
 import re
 
@@ -20,11 +23,15 @@ from pydantic import BaseModel, EmailStr, Field, ValidationError
 from sqlalchemy import Column, Integer, JSON, MetaData, String, Table, create_engine, select, update
 from svix.webhooks import Webhook, WebhookVerificationError
 
-from app import providers
+from app import discovery, providers
 
 load_dotenv()
 STATIC = Path(__file__).parent / "static"
-engine = create_engine(os.getenv("DATABASE_URL", "sqlite:///ledgerwise.sqlite3"))
+DEMO = os.getenv("LEDGERWISE_DEMO") == "1"
+engine = create_engine(
+    os.getenv("DEMO_DATABASE_URL", "sqlite:///ledgerwise-demo.sqlite3") if DEMO
+    else os.getenv("DATABASE_URL", "sqlite:///ledgerwise.sqlite3")
+)
 schema = MetaData()
 profiles = Table("profiles", schema, Column("id", String, primary_key=True),
                  Column("contact", String, unique=True), Column("record", JSON, nullable=False))
@@ -45,6 +52,7 @@ SEED = {
         "source_date": "2024-08-13",
     }],
     "timing": None,
+    "fit_score": 40,
     "drafts": [],
     "replies": [],
     "status": "research",
@@ -53,31 +61,75 @@ SEED = {
 }
 
 
+def seed_prospects():
+    yield "allbirds", SEED
+    catalog = json.loads((STATIC.parent / "prospects.json").read_text(encoding="utf-8"))
+    for brand in catalog:
+        company_id = brand["domain"].split(".")[0]
+        yield company_id, {
+            **SEED,
+            "name": brand["name"],
+            "domain": brand["domain"],
+            "evidence": [{
+                "id": f"{company_id}-online",
+                "criterion": "US e-commerce",
+                "fact": f"{brand['name']} sells {brand['category']} online.",
+                "excerpt": "The directory lists the brand under United States in its digital-native and DTC segment.",
+                "url": brand["url"],
+                "checked_on": "2026-11-13",
+            }],
+        }
+
+
 @asynccontextmanager
 async def lifespan(_app):
     schema.create_all(engine)
     with engine.begin() as db:
         if db.scalar(select(control.c.id)) is None:
             db.execute(control.insert().values(id=1, sequence=0))
-        if db.scalar(select(profiles.c.id).where(profiles.c.id == "allbirds")) is None:
-            db.execute(profiles.insert().values(id="allbirds", record=SEED))
+        existing = set(db.scalars(select(profiles.c.id)))
+        for company_id, profile in seed_prospects():
+            if company_id not in existing:
+                db.execute(profiles.insert().values(id=company_id, record=profile))
     yield
 
 
 app = FastAPI(title="Ledgerwise SDR", lifespan=lifespan)
 basic = HTTPBasic(auto_error=False)
+login_lock = Lock()
+login_failures = 0
+login_window = 0.0
+MAX_WEBHOOK_BYTES = 1024 * 1024
 
 
 def operator(request: Request, credentials: Annotated[HTTPBasicCredentials | None, Depends(basic)]):
+    global login_failures, login_window
     origin = request.headers.get("origin")
     if request.method in {"POST", "PUT", "PATCH"} and origin and origin != str(request.base_url).rstrip("/"):
         raise HTTPException(403, "Cross-origin workspace request.")
     password = os.getenv("WORKSPACE_PASSWORD")
-    if not password and not os.getenv("RESEND_API_KEY") and not os.getenv("GOOGLE_REFRESH_TOKEN") and not os.getenv("LANGFLOW_RUN_URL"):
+    loopback = {"localhost", "127.0.0.1", "::1"}
+    if (not password and DEMO and os.getenv("LEDGERWISE_LOCAL_DEMO") == "1"
+            and request.client and request.client.host in loopback
+            and request.url.hostname in loopback
+            and not any(key in request.headers for key in (
+                "forwarded", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto"
+            ))
+            and not os.getenv("OPENAI_API_KEY")):
         return
-    if (password and credentials and credentials.username == "ledgerwise"
-            and compare_digest(credentials.password.encode(), password.encode())):
-        return
+    if password and credentials:
+        if (credentials.username == "ledgerwise"
+                and compare_digest(credentials.password.encode(), password.encode())):
+            return
+        with login_lock:
+            now = monotonic()
+            if now >= login_window:
+                login_window = now + 60
+                login_failures = 0
+            if login_failures >= 10:
+                raise HTTPException(429, "Too many failed sign-in attempts.",
+                                    headers={"Retry-After": str(int(login_window - now) + 1)})
+            login_failures += 1
     raise HTTPException(401, "Workspace authentication required.",
                         headers={"WWW-Authenticate": "Basic"})
 
@@ -126,6 +178,7 @@ class DraftContent(BaseModel):
 
 class Review(BaseModel):
     decision: Literal["approve", "reject"]
+    sources_verified: bool = False
 
 
 class Contact(BaseModel):
@@ -134,6 +187,10 @@ class Contact(BaseModel):
 
 class Slot(BaseModel):
     start: datetime
+
+
+class DemoReply(BaseModel):
+    body: str = Field(min_length=1, max_length=6000)
 
 
 @app.get("/healthz")
@@ -154,12 +211,49 @@ def workspace_script():
 @app.get("/api/companies", dependencies=operator_only)
 def companies():
     with engine.connect() as db:
-        return [{"id": row.id, "contact": row.contact, **row.record}
+        return [{"id": row.id, "contact": row.contact, "fit_score": 40, **row.record}
                 for row in db.execute(select(profiles).order_by(profiles.c.id))]
+
+
+@app.get("/api/settings", dependencies=operator_only)
+def settings():
+    return {"demo": DEMO, "controlled_recipient": os.getenv("CONTROLLED_RECIPIENT") or None}
+
+
+@app.post("/api/discovery", dependencies=operator_only)
+def find_prospects():
+    with engine.connect() as db:
+        domains = {row["domain"] for row in db.scalars(select(profiles.c.record))}
+    candidates = list(discovery.discover(domains))
+    added = []
+    with transaction() as db:
+        domains = {row["domain"] for row in db.scalars(select(profiles.c.record))}
+        for name, domain, evidence in candidates:
+            if domain in domains:
+                continue
+            company_id = uuid4().hex
+            criteria = {item["criterion"] for item in evidence}
+            timing = next((item["fact"] for item in evidence if item["criterion"] == "Timing"), None)
+            profile = {
+                **SEED, "id": company_id, "contact": None, "name": name, "domain": domain,
+                "evidence": evidence, "timing": timing,
+                "fit_score": 40 + 30 * ("Revenue" in criteria) + 30 * ("Employees" in criteria),
+                "discovered": True, "drafts": [], "replies": [],
+            }
+            record = {key: value for key, value in profile.items() if key not in {"id", "contact"}}
+            db.execute(profiles.insert().values(id=company_id, record=record))
+            if {"Revenue", "Employees"} <= criteria:
+                draft = DraftContent.model_validate(providers.sourced_draft(name, evidence, local_only=True))
+                append_draft(db, profile, draft)
+            domains.add(domain)
+            added.append(company_id)
+    return {"added": added}
 
 
 @app.put("/api/companies/{company_id}/contact", dependencies=operator_only)
 def contact(company_id: str, data: Contact):
+    if DEMO:
+        raise HTTPException(409, "Demo sends use a simulated mailbox.")
     address = data.address.lower()
     if address != providers.setting("CONTROLLED_RECIPIENT").strip().lower():
         raise HTTPException(422, "Use the configured controlled mailbox.")
@@ -182,7 +276,9 @@ def create_draft(company_id: str):
         if profile["drafts"]:
             raise HTTPException(409, "Open the existing draft to make changes.")
         try:
-            draft = DraftContent.model_validate(providers.sourced_draft(profile["name"], profile["evidence"]))
+            draft = DraftContent.model_validate(providers.sourced_draft(
+                profile["name"], profile["evidence"], local_only=DEMO
+            ))
         except ValidationError as exc:
             raise HTTPException(502, "Draft provider returned invalid fields.") from exc
         return append_draft(db, profile, draft)
@@ -218,6 +314,10 @@ def review_draft(company_id: str, draft_id: str, data: Review):
         draft = current_draft(profile, draft_id)
         if draft["state"] != "pending":
             raise HTTPException(409, "Only a pending draft can be reviewed.")
+        if data.decision == "approve" and profile.get("discovered"):
+            if not data.sources_verified:
+                raise HTTPException(422, "Verify the cited sources before approving.")
+            draft["sources_verified"] = True
         draft["state"] = {"approve": "approved", "reject": "rejected"}[data.decision]
         return save(db, profile)
 
@@ -230,13 +330,17 @@ def send_draft(company_id: str, draft_id: str):
         if draft["state"] == "sent":
             return profile
         active(profile)
+        if draft["state"] not in {"approved", "sending"}:
+            raise HTTPException(409, "Approve this exact version before sending.")
+        if profile.get("discovered") and not draft.get("sources_verified"):
+            raise HTTPException(409, "Verify the cited sources on a new draft version.")
+        if DEMO:
+            return mark_sent(db, profile, draft, f"demo-{draft_id}")
         address = profile["contact"]
         if not address or address != providers.setting("CONTROLLED_RECIPIENT").strip().lower():
             raise HTTPException(409, "Set the controlled mailbox before sending.")
         if db.scalar(select(suppressions.c.address).where(suppressions.c.address == address)):
             raise HTTPException(409, "This mailbox is suppressed.")
-        if draft["state"] not in {"approved", "sending"}:
-            raise HTTPException(409, "Approve this exact version before sending.")
         for name in ("RESEND_API_KEY", "MAIL_FROM", "MAIL_REPLY_TO"):
             providers.setting(name)
         if draft["state"] == "approved":
@@ -254,11 +358,16 @@ def send_draft(company_id: str, draft_id: str):
             raise HTTPException(409, "This mailbox is suppressed.")
         if datetime.now(UTC) - datetime.fromisoformat(draft["send_started"]) >= timedelta(hours=23):
             raise HTTPException(409, "Check Resend for delivery. The safe retry window has expired.")
-        draft["provider_id"] = providers.send_email(address, draft, f"ledgerwise/{draft_id}")
-        draft["state"] = "sent"
-        if profile["status"] == "research":
-            profile["status"] = "sent"
-        return save(db, profile)
+        provider_id = providers.send_email(address, draft, f"ledgerwise/{draft_id}")
+        return mark_sent(db, profile, draft, provider_id)
+
+
+def mark_sent(db, profile, draft, provider_id):
+    draft["provider_id"] = provider_id
+    draft["state"] = "sent"
+    if profile["status"] == "research":
+        profile["status"] = "sent"
+    return save(db, profile)
 
 
 def classify_reply(body):
@@ -271,7 +380,11 @@ def classify_reply(body):
     text = " ".join(lines).lower().replace("’", "'")
     if re.search(r"\bunsubscribe\b|\bopt[ -]out\b|\bnot interested\b|\bno thanks\b|\b(?:stop|do not|don't|no more)\s+(?:email|contact|send|message)", text):
         return "opt_out"
-    if re.search(r"\b(?:pricing|price|cost|rates|bot|automated)\b", text):
+    if re.search(r"\b(?:bot|automated)\b", text):
+        return "bot_question"
+    if re.search(r"\b(?:pricing|price|cost|rates)\b", text):
+        return "pricing_question"
+    if re.search(r"\b(?:not|never)\s+available\b|\bunavailable\b|\bcan't\s+(?:meet|talk|schedule)\b", text):
         return "human_review"
     if re.search(r"\b(?:let's (?:meet|talk|schedule)|available (?:on|next|for)|book a call|schedule a call)\b", text):
         return "meeting_interest"
@@ -280,9 +393,15 @@ def classify_reply(body):
 
 @app.post("/webhooks/email/inbound")
 async def receive_email(request: Request):
-    raw = await request.body()
+    if DEMO:
+        raise HTTPException(404, "Live email webhook is disabled in demo mode.")
+    raw = bytearray()
+    async for chunk in request.stream():
+        if len(raw) + len(chunk) > MAX_WEBHOOK_BYTES:
+            raise HTTPException(413, "Webhook payload too large.")
+        raw.extend(chunk)
     try:
-        event = Webhook(providers.setting("RESEND_WEBHOOK_SECRET")).verify(raw, dict(request.headers))
+        event = Webhook(providers.setting("RESEND_WEBHOOK_SECRET")).verify(bytes(raw), dict(request.headers))
     except (WebhookVerificationError, ValueError) as exc:
         raise HTTPException(401, "Invalid webhook signature.") from exc
     if event.get("type") != "email.received":
@@ -304,18 +423,70 @@ def process_inbound(data):
             return {"status": "ignored"}
         email = providers.resend("GET", "/emails/receiving/" + receipt)
         body = email.get("text") or ""
-        intent = classify_reply(body)
         profile = load(db, company_id)
-        profile["replies"].append({"body": body, "intent": intent, "received_at": data.get("created_at")})
-        if intent == "opt_out":
-            profile["status"] = intent
-            if not db.scalar(select(suppressions.c.address).where(suppressions.c.address == address)):
-                db.execute(suppressions.insert().values(address=address))
-        elif profile["status"] != "opt_out" and not profile["booking"]:
-            profile["status"] = intent
-        db.execute(inbound.insert().values(id=receipt))
+        profile["replies"].append({
+            "id": receipt, "body": body, "intent": "human_review",
+            "received_at": data.get("created_at"), "verification_pending": True,
+        })
         save(db, profile)
+        db.execute(inbound.insert().values(id=receipt))
     return {"status": "processed"}
+
+
+@app.post("/api/companies/{company_id}/replies/{receipt}/verify", dependencies=operator_only)
+def verify_reply(company_id: str, receipt: str):
+    with transaction() as db:
+        profile = load(db, company_id)
+        reply = next((item for item in profile["replies"] if item.get("id") == receipt), None)
+        if reply is None:
+            raise HTTPException(404, "Reply not found.")
+        if not reply.get("verification_pending"):
+            return profile
+        if not any(draft["state"] == "sent" for draft in profile["drafts"]):
+            raise HTTPException(409, "Verification requires an outbound email.")
+        reply["verification_pending"] = False
+        return record_reply(db, profile, reply["body"], reply["received_at"], reply=reply)
+
+
+def record_reply(db, profile, body, received_at, *, reply=None):
+    intent = classify_reply(body)
+    if reply is None:
+        profile["replies"].append({"body": body, "intent": intent, "received_at": received_at})
+    else:
+        reply["intent"] = intent
+    if intent == "opt_out":
+        profile["status"] = intent
+        address = profile["contact"]
+        if address and not db.scalar(select(suppressions.c.address).where(suppressions.c.address == address)):
+            db.execute(suppressions.insert().values(address=address))
+    elif profile["status"] != "opt_out" and not profile["booking"]:
+        reply_templates = {
+            "pricing_question": "Thanks for asking. We can discuss your bookkeeping needs and pricing on a short introductory call. Would that help?",
+            "bot_question": "Yes, Ledgerwise uses automation to help draft emails. A person at Ledgerwise reviews messages before sending them.",
+        }
+        profile["status"] = "human_review" if intent in reply_templates else intent
+        if (intent in reply_templates and not profile["takeover"]
+                and profile["drafts"] and profile["drafts"][-1]["state"] == "sent"):
+            previous = profile["drafts"][-1]
+            subject = previous["subject"]
+            if not subject.lower().startswith("re:"):
+                subject = f"Re: {subject}"
+            return append_draft(db, profile, DraftContent(
+                subject=subject[:180], body=reply_templates[intent],
+                evidence_ids=previous["evidence_ids"],
+            ))
+    return save(db, profile)
+
+
+@app.post("/api/companies/{company_id}/demo-replies", dependencies=operator_only)
+def demo_reply(company_id: str, data: DemoReply):
+    if not DEMO:
+        raise HTTPException(404, "Simulated replies require demo mode.")
+    with transaction() as db:
+        profile = load(db, company_id)
+        if not any(draft["state"] == "sent" for draft in profile["drafts"]):
+            raise HTTPException(409, "Send a demo email before simulating a reply.")
+        return record_reply(db, profile, data.body, datetime.now(UTC).isoformat())
 
 
 @app.post("/api/companies/{company_id}/takeover", dependencies=operator_only)
@@ -343,6 +514,15 @@ def ready_to_book(profile):
     active(profile)
     if profile["status"] != "meeting_interest":
         raise HTTPException(409, "Booking requires an interested reply.")
+    if not DEMO and not any(
+        reply.get("verification_pending") is False and reply["intent"] == "meeting_interest"
+        for reply in profile["replies"]
+    ):
+        raise HTTPException(409, "Booking requires a verified interested reply.")
+
+
+def demo_busy(db):
+    return [record["booking"] for record in db.scalars(select(profiles.c.record)) if record["booking"]]
 
 
 @app.get("/api/companies/{company_id}/slots", dependencies=operator_only)
@@ -351,7 +531,11 @@ def slots(company_id: str):
         ready_to_book(load(db, company_id))
     candidates = list(candidate_slots(datetime.now(UTC)))
     duration = timedelta(minutes=30)
-    busy = providers.Calendar().busy(candidates[0], candidates[-1] + duration)
+    if DEMO:
+        with engine.connect() as db:
+            busy = demo_busy(db)
+    else:
+        busy = providers.Calendar().busy(candidates[0], candidates[-1] + duration)
     return [start for start in candidates if not overlaps(start, start + duration, busy)]
 
 
@@ -369,8 +553,8 @@ def book(company_id: str, slot: Slot):
             raise HTTPException(409, "A meeting is already booked for this company.")
         ready_to_book(profile)
         event_id = sha256(f"ledgerwise/{company_id}/{start.isoformat()}".encode()).hexdigest()
-        calendar = providers.Calendar()
-        event = calendar.event(event_id)
+        calendar = None if DEMO else providers.Calendar()
+        event = None if DEMO else calendar.event(event_id)
         evidence = "\n".join(f"{item['fact']} ({item['url']})" for item in profile["evidence"])
         replies = "\n\n".join(item["body"] for item in profile["replies"]
                                if item["intent"] == "meeting_interest")
@@ -383,9 +567,12 @@ def book(company_id: str, slot: Slot):
         if event is None:
             if start not in set(candidate_slots(datetime.now(UTC))):
                 raise HTTPException(422, "Choose a slot from the current availability list.")
-            if calendar.busy(start, end):
+            busy = overlaps(start, end, demo_busy(db)) if DEMO else calendar.busy(start, end)
+            if busy:
                 raise HTTPException(409, "This slot is no longer available. Refresh availability.")
-            event = calendar.book(event_id, profile["name"], start, end, brief)
+            event = {"id": f"demo-{event_id}"} if DEMO else calendar.book(
+                event_id, profile["name"], start, end, brief
+            )
         profile["booking"] = {
             "event_id": event["id"], "url": event.get("htmlLink"), "start": start.isoformat(),
             "end": end.isoformat(), "brief": brief,

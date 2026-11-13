@@ -41,7 +41,7 @@ def send_email(contact, draft, key):
     })["id"]
 
 
-def sourced_draft(company, evidence):
+def sourced_draft(company, evidence, *, local_only=False):
     context = json.dumps({"company": company, "evidence": evidence})
     prompt = (
         'Write one short first-touch email for Ledgerwise, a bookkeeping and finance '
@@ -50,9 +50,9 @@ def sourced_draft(company, evidence):
         'when supported. Return plain JSON with subject, body and evidence_ids. '
         'Include the supporting evidence IDs, and use no placeholders.\n' + context
     )
-    url = os.getenv("LANGFLOW_RUN_URL")
+    url = None if local_only else os.getenv("LANGFLOW_RUN_URL")
     if not url:
-        item = evidence[0]
+        item = next((item for item in evidence if item["criterion"] == "Timing"), evidence[0])
         return {
             "subject": f"An introduction to Ledgerwise for {company}",
             "body": (
