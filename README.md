@@ -1,6 +1,10 @@
 # Ledgerwise SDR
 
-Run the workspace from this directory.
+> **Simulated case-study demo.** This project uses a seeded Allbirds example and public source material. It is not connected to Ledgerwise's real systems, email, or calendar. Keep provider credentials unset for the demo.
+
+## Run locally
+
+Run these commands in PowerShell from the repository directory:
 
 ```powershell
 py -m venv .venv
@@ -8,21 +12,31 @@ py -m venv .venv
 .venv\Scripts\python.exe -m uvicorn app.main:app --reload
 ```
 
-Open [the workspace](http://127.0.0.1:8000) to explore the sourced Allbirds example and review a draft. SQLite is the local default. The SQLAlchemy PostgreSQL connection uses a `postgresql+psycopg://` URL.
+Open http://127.0.0.1:8000. The workspace username is `ledgerwise`. Set a local `WORKSPACE_PASSWORD` in an untracked `.env` file if you want authentication during local use. SQLite is the local default. For a persistent PostgreSQL database, set `DATABASE_URL` to a `postgresql+psycopg://` URL.
 
-## Verify the live workflow
+## Explore the simulated workflow
 
-1. Copy `.env.example` to `.env` and set a workspace password. The username is `ledgerwise`. Run a single app worker and use HTTPS for the provider callback.
-2. Add a Resend API key with send and receive access, a verified sender, and a Resend inbound address as `MAIL_REPLY_TO`. Set `CONTROLLED_RECIPIENT` to a mailbox you own. Register the public `/webhooks/email/inbound` endpoint for `email.received` and put its signing secret in `.env`.
-3. Enable the Google Calendar API. Provide an OAuth client ID, client secret, refresh token, and the exact ID of a dedicated calendar. Grant the Calendar OAuth scope `https://www.googleapis.com/auth/calendar` to the calendar owner.
-4. In Prospects, save the controlled mailbox and generate a draft. In Inbox, inspect the evidence, approve the exact version, and send it. Reply from the controlled mailbox with a message such as “I’m available next Tuesday for a call.” Reopen Inbox and confirm the reply appeared.
-5. In Meetings, check live availability, choose a slot agreed with the test recipient, and open the event and its brief. The event is created on the dedicated calendar without sending a guest invitation.
+1. Open the seeded Allbirds prospect and review its evidence.
+2. Generate and inspect the sourced draft.
+3. Review how the app tracks prospect status and human review.
 
-Check Resend delivery logs before investigating a send with an unknown outcome. A retry uses the same idempotency key within the provider's safe window.
+Do not send email or book a real meeting from this demo. With provider credentials unset, email sending, inbound email processing, and calendar availability or booking are unavailable.
 
-## Optional Langflow evaluation
+## Deploy the demo on Render
 
-Create a Chat Input → model → Chat Output flow. Its model should return a single plain JSON object with `subject`, `body`, and `evidence_ids`. Set `LANGFLOW_RUN_URL` to the full `/api/v1/run/<flow-id>` endpoint and set `LANGFLOW_API_KEY`. Generate a draft in a fresh workspace and compare its claims and source references against the built-in evidence template.
+Use a Python web service connected to the `main` branch:
+
+- Build command: `pip install -r requirements.txt`
+- Start command: `uvicorn app.main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips='*'`
+- Health check path: `/healthz`
+- Set `LEDGERWISE_DEMO=1` and a strong `WORKSPACE_PASSWORD` in Render's Environment settings.
+
+Keep all provider settings empty in the demo deployment. Do not add Resend, Google Calendar, or Langflow credentials. The app reads those settings to access external services; leaving them unset keeps those integrations unavailable. Enter passwords and other secrets only in the local `.env` file or the hosting provider's secret settings. Never commit `.env` or share secret values in screenshots, chat, or source files. The repository's `.gitignore` excludes `.env`.
+
+## Health check
+
+Render and other hosts can check `/healthz`. A healthy response is JSON with `status` set to `ok`.
+
+## Project notes
 
 See [the PRD](PRD.md), [roadmap](ROADMAP.md), and [implementation notes](HOW_I_WORKED.md).
-
