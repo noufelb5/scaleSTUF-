@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ledgerwise SDR</title>
+  <style>
+    :root { color-scheme: light; font: 16px/1.55 system-ui, sans-serif; color: #172e27; background: #eff3ee; }
+    body { margin: 0; }
+    header { background: #14372d; color: #f0f7ef; }
+    .bar, main { max-width: 70rem; margin: auto; padding: 1.5rem clamp(1rem, 5vw, 4rem); }
+    .bar, nav, .actions { display: flex; gap: .75rem; flex-wrap: wrap; align-items: center; }
+    .bar { justify-content: space-between; }
+    .brand { font: bold 1.6rem Georgia, serif; }
+    h1, h2 { font-family: Georgia, serif; line-height: 1.1; }
+    h1 { font-size: clamp(2rem, 6vw, 3.5rem); margin: 1rem 0; }
+    article { background: #fff; border: 1px solid #d2ded4; border-radius: 1rem; padding: 1.5rem; margin: 1rem 0; }
+    label { display: grid; gap: .35rem; margin: 1rem 0; }
+    textarea, input, button { font: inherit; border-radius: .45rem; padding: .5rem .75rem; border: 1px solid #7e9a8c; }
+    textarea { min-height: 10rem; }
+    button { color: #16362a; background: #e4f1e8; cursor: pointer; }
+    button[aria-current="page"] { background: #fcfffc; color: #13372c; }
+    button:disabled { opacity: .55; cursor: wait; }
+    a { color: #125c44; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
+    #status { color: #8a3426; }
+  </style>
+  <script src="/workspace.js" defer></script>
+</head>
+<body>
+  <header><div class="bar">
+    <span class="brand">Ledgerwise</span>
+    <nav aria-label="Workspace">
+      <button type="button">Prospects</button>
+      <button type="button">Inbox</button>
+      <button type="button">Meetings</button>
+    </nav>
+  </div></header>
+  <main>
+    <h1 id="title">Prospects</h1>
+    <p id="status" role="status"></p>
+    <div id="workspace"></div>
+  </main>
+</body>
+</html>
