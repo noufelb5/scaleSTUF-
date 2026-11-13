@@ -1,5 +1,7 @@
 # Ledgerwise SDR
 
+[Open the hosted demo on Render](https://scalestuf.onrender.com/)
+
 > **Simulated case-study demo.** This project uses a seeded Allbirds example and public source material. It is not connected to Ledgerwise's real systems, email, or calendar. Keep provider credentials unset for the demo.
 
 ## Run locally
