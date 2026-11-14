@@ -23,3 +23,18 @@ Selected Resend for email and Google Calendar for availability and event creatio
 
 Live Resend delivery and inbound callback, real Google Calendar booking, PostgreSQL deployment, and the optional live Langflow comparison remain unverified. No paid provider calls were made or measured. The 30-company research pass and deployment follow the live controlled journey. Complete the session exports and Loom after verification.
 
+
+
+## Research-to-booking verification
+
+The local FastAPI and SQLite test ran the prospect journey with simulated OpenAI, Resend, and Google Calendar HTTP responses. It exercised the app's actual source validation, draft state transitions, webhook signature checks, and booking flow.
+
+| Scenario | Observed result |
+| --- | --- |
+| Research, save, and draft | A matching candidate kept its source evidence. A duplicate save returned the original profile. The initial draft cited that profile's evidence. |
+| Initial send and signed inbound reply | Pending outreach was blocked. After approval, the controlled send succeeded. The signed reply was processed once and a bad signature returned 401. |
+| Follow-up review and send | The meeting reply produced available UTC options. Editing required new approval. A retry after success sent no duplicate, and the email used the incoming message ID for threading. |
+| Reply changes and handoff | Pricing and automation replies produced reviewable drafts. A newer reply blocked stale outreach. An ambiguous reply required human review and an opt-out blocked further actions. |
+| Confirmed meeting | A repeat booking returned the original event and the brief contained the prospect's reply. |
+
+Live provider credentials were unavailable in the test workspace. The controlled live journey and provider costs remain unverified. The README includes the private test setup.

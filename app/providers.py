@@ -1,6 +1,7 @@
 """External operations used by the Ledgerwise workflow."""
 import json
 import os
+import re
 from urllib.parse import quote
 
 import httpx
@@ -32,13 +33,41 @@ def resend(method, path, *, headers=None, **kwargs):
 
 
 def send_email(contact, draft, key):
-    return resend("POST", "/emails", headers={"Idempotency-Key": key}, json={
+    payload = {
         "from": setting("MAIL_FROM"),
         "to": [contact],
         "reply_to": setting("MAIL_REPLY_TO"),
         "subject": draft["subject"],
         "text": draft["body"],
-    })["id"]
+    }
+    message_id = (draft.get("followup") or {}).get("message_id")
+    if isinstance(message_id, str) and re.fullmatch(r"<[^<>\s]+@[^<>\s]+>", message_id):
+        payload["headers"] = {"In-Reply-To": message_id, "References": message_id}
+    return resend("POST", "/emails", headers={"Idempotency-Key": key}, json=payload)["id"]
+
+
+def followup_body(topic, slots):
+    if topic == "meeting":
+        if slots:
+            choices = "\n".join(f"- {slot:%a %b %d, %Y at %H:%M} UTC" for slot in slots)
+            message = (
+                "Thanks for your reply. Here are a few options for a 30-minute introductory call:"
+                f"\n\n{choices}\n\nWhich time works for you? We’ll confirm it before booking."
+            )
+        else:
+            message = "Thanks for your reply. What days and times work for a 30-minute introductory call?"
+    elif topic == "pricing":
+        message = (
+            "Thanks for asking about pricing. Ledgerwise provides bookkeeping for e-commerce "
+            "businesses. We can discuss your needs and the scope on a short introductory call. "
+            "Would that be helpful?"
+        )
+    else:
+        message = (
+            "Thanks for asking. Software helps Ledgerwise prepare and manage this outreach, "
+            "and a person reviews and approves emails before sending. What can we help you with?"
+        )
+    return "Hi,\n\n" + message + "\n\nBest,\nThe Ledgerwise team"
 
 
 def sourced_draft(company, evidence):

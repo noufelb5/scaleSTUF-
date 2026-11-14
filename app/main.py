@@ -125,7 +125,7 @@ def current_draft(profile, draft_id):
 class DraftContent(BaseModel):
     subject: str = Field(min_length=1, max_length=180)
     body: str = Field(min_length=1, max_length=6000)
-    evidence_ids: list[str] = Field(min_length=1, max_length=20)
+    evidence_ids: list[str] = Field(max_length=20)
 
 
 class Review(BaseModel):
@@ -158,8 +158,16 @@ def workspace_script():
 @app.get("/api/companies", dependencies=operator_only)
 def companies():
     with engine.connect() as db:
-        return [{"id": row.id, "contact": row.contact, **row.record}
-                for row in db.execute(select(profiles).order_by(profiles.c.id))]
+        return [
+            {
+                "id": row.id, "contact": row.contact, **row.record,
+                "replies": [
+                    {**reply, "can_draft_followup": followup_topic(reply) is not None}
+                    for reply in row.record["replies"]
+                ],
+            }
+            for row in db.execute(select(profiles).order_by(profiles.c.id))
+        ]
 
 
 @app.post("/api/research", dependencies=operator_only)
@@ -240,14 +248,60 @@ def create_draft(company_id: str):
         return append_draft(db, profile, draft)
 
 
-def append_draft(db, profile, draft):
+def append_draft(db, profile, draft, *, followup=None):
+    if followup is None and not draft.evidence_ids:
+        raise HTTPException(422, "Initial outreach must cite company evidence.")
     if not set(draft.evidence_ids) <= {item["id"] for item in profile["evidence"]}:
         raise HTTPException(422, "Draft cites evidence outside this company.")
     profile["drafts"].append({
         **draft.model_dump(), "id": uuid4().hex, "state": "pending",
         "version": len(profile["drafts"]) + 1,
     })
+    if followup is not None:
+        profile["drafts"][-1]["followup"] = followup
     return save(db, profile)
+
+
+def check_followup(profile, draft):
+    followup = draft.get("followup")
+    if not followup:
+        return
+    if profile["booking"]:
+        raise HTTPException(409, "This conversation already has a booked meeting.")
+    if followup["reply_index"] != len(profile["replies"]) - 1:
+        raise HTTPException(409, "A newer reply arrived. Generate a fresh follow-up.")
+
+
+@app.post("/api/companies/{company_id}/followups", dependencies=operator_only)
+def create_followup(company_id: str):
+    with transaction() as db:
+        profile = load(db, company_id)
+        active(profile)
+        if profile["booking"] or not profile["replies"]:
+            raise HTTPException(409, "A follow-up needs an open conversation with a reply.")
+        if not any(draft["state"] == "sent" for draft in profile["drafts"]):
+            raise HTTPException(409, "Send the approved first outreach before drafting a follow-up.")
+        previous = profile["drafts"][-1]
+        reply_index = len(profile["replies"]) - 1
+        existing = previous.get("followup")
+        if existing and existing["reply_index"] == reply_index:
+            return profile
+        if previous["state"] == "sending":
+            raise HTTPException(409, "Resolve the current send before drafting another email.")
+
+        reply = profile["replies"][reply_index]
+        topic = followup_topic(reply)
+        if topic is None:
+            raise HTTPException(409, "This reply needs a human response.")
+        body = providers.followup_body(topic, available_slots()[:3] if topic == "meeting" else [])
+        subject = reply.get("subject") or previous["subject"]
+        subject = subject if subject.lower().startswith("re:") else "Re: " + subject
+        draft = DraftContent(subject=subject[:180], body=body, evidence_ids=[])
+        if previous["state"] in {"pending", "approved", "rejected"}:
+            previous["state"] = "superseded"
+        return append_draft(db, profile, draft, followup={
+            "reply_index": reply_index, "message_id": reply.get("message_id"),
+        })
 
 
 @app.patch("/api/companies/{company_id}/drafts/{draft_id}", dependencies=operator_only)
@@ -258,8 +312,9 @@ def edit_draft(company_id: str, draft_id: str, draft: DraftContent):
         old = current_draft(profile, draft_id)
         if old["state"] in {"sending", "sent"}:
             raise HTTPException(409, "A dispatched version cannot be edited.")
+        check_followup(profile, old)
         old["state"] = "superseded"
-        return append_draft(db, profile, draft)
+        return append_draft(db, profile, draft, followup=old.get("followup"))
 
 
 @app.post("/api/companies/{company_id}/drafts/{draft_id}/review", dependencies=operator_only)
@@ -268,6 +323,7 @@ def review_draft(company_id: str, draft_id: str, data: Review):
         profile = load(db, company_id)
         active(profile)
         draft = current_draft(profile, draft_id)
+        check_followup(profile, draft)
         if draft["state"] != "pending":
             raise HTTPException(409, "Only a pending draft can be reviewed.")
         draft["state"] = {"approve": "approved", "reject": "rejected"}[data.decision]
@@ -282,6 +338,7 @@ def send_draft(company_id: str, draft_id: str):
         if draft["state"] == "sent":
             return profile
         active(profile)
+        check_followup(profile, draft)
         address = profile["contact"]
         if not address or address != providers.setting("CONTROLLED_RECIPIENT").strip().lower():
             raise HTTPException(409, "Set the controlled mailbox before sending.")
@@ -302,6 +359,9 @@ def send_draft(company_id: str, draft_id: str):
         if draft["state"] == "sent":
             return profile
         active(profile)
+        check_followup(profile, draft)
+        if address != providers.setting("CONTROLLED_RECIPIENT").strip().lower():
+            raise HTTPException(409, "The controlled mailbox changed before dispatch.")
         if db.scalar(select(suppressions.c.address).where(suppressions.c.address == address)):
             raise HTTPException(409, "This mailbox is suppressed.")
         if datetime.now(UTC) - datetime.fromisoformat(draft["send_started"]) >= timedelta(hours=23):
@@ -313,21 +373,38 @@ def send_draft(company_id: str, draft_id: str):
         return save(db, profile)
 
 
-def classify_reply(body):
+def reply_text(body):
     # Stop at the first quoted message or signature delimiter.
     lines = []
     for line in body.splitlines():
         if line.startswith((">", "-- ")) or re.match(r"^On .+wrote:$", line.strip()):
             break
         lines.append(line)
-    text = " ".join(lines).lower().replace("’", "'")
+    return " ".join(lines).lower().replace("’", "'")
+
+
+def classify_reply(body):
+    text = reply_text(body)
     if re.search(r"\bunsubscribe\b|\bopt[ -]out\b|\bnot interested\b|\bno thanks\b|\b(?:stop|do not|don't|no more)\s+(?:email|contact|send|message)", text):
         return "opt_out"
     if re.search(r"\b(?:pricing|price|cost|rates|bot|automated)\b", text):
         return "human_review"
-    if re.search(r"\b(?:let's (?:meet|talk|schedule)|available (?:on|next|for)|book a call|schedule a call)\b", text):
+    if re.search(r"\b(?:let's (?:meet|talk|schedule)|available (?:on|next|for)|book a call|schedule a call|that (?:time|slot) works|(?:first|second|third) (?:time|slot|option) works)\b", text):
         return "meeting_interest"
     return "human_review"
+
+
+def followup_topic(reply):
+    if reply["intent"] == "meeting_interest":
+        return "meeting"
+    if reply["intent"] != "human_review":
+        return None
+    text = reply_text(reply["body"])
+    if re.search(r"\b(?:bot|automated)\b", text):
+        return "automation"
+    if re.search(r"\b(?:pricing|price|cost|rates)\b", text):
+        return "pricing"
+    return None
 
 
 @app.post("/webhooks/email/inbound")
@@ -358,7 +435,11 @@ def process_inbound(data):
         body = email.get("text") or ""
         intent = classify_reply(body)
         profile = load(db, company_id)
-        profile["replies"].append({"body": body, "intent": intent, "received_at": data.get("created_at")})
+        reply = {
+            "body": body, "intent": intent, "received_at": data.get("created_at"),
+            "subject": email.get("subject"), "message_id": email.get("message_id"),
+        }
+        profile["replies"].append(reply)
         if intent == "opt_out":
             profile["status"] = intent
             if not db.scalar(select(suppressions.c.address).where(suppressions.c.address == address)):
@@ -401,6 +482,10 @@ def ready_to_book(profile):
 def slots(company_id: str):
     with engine.connect() as db:
         ready_to_book(load(db, company_id))
+    return available_slots()
+
+
+def available_slots():
     candidates = list(candidate_slots(datetime.now(UTC)))
     duration = timedelta(minutes=30)
     busy = providers.Calendar().busy(candidates[0], candidates[-1] + duration)

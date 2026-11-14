@@ -100,10 +100,23 @@ function renderInbox(card, profile, path) {
   element("p", profile.takeover ? "Human takeover active" : labels[profile.status], card);
   const paused = profile.takeover || profile.status === "opt_out";
   const draft = profile.drafts.at(-1);
+  const replyIndex = profile.replies.length - 1;
+  const reply = profile.replies[replyIndex];
+  const stale = draft?.followup && draft.followup.reply_index !== replyIndex;
+  const followupClosed = draft?.followup && profile.booking;
+  const canFollowUp = !paused && !profile.booking && reply?.can_draft_followup &&
+    profile.drafts.some(item => item.state === "sent") &&
+    draft.state !== "sending" && draft.followup?.reply_index !== replyIndex;
   if (draft) {
-    element("h3", "Email version " + draft.version + " · " + draft.state, card);
+    const kind = draft.followup ? "Follow-up" : "Outreach";
+    element("h3", kind + " version " + draft.version + " · " + draft.state, card);
+    if (stale && draft.state === "sending") {
+      element("p", "A newer reply arrived during dispatch. Check delivery in Resend and take over the conversation.", card);
+    } else if (stale && draft.state !== "sent") {
+      element("p", "A newer reply arrived. Review the latest message before sending.", card);
+    }
     const draftPath = path + "/drafts/" + draft.id;
-    const editable = !paused && !["sending", "sent"].includes(draft.state);
+    const editable = !paused && !stale && !followupClosed && !["sending", "sent"].includes(draft.state);
     const subject = field(card, "Subject", draft.subject);
     const body = field(card, "Message", draft.body, "textarea");
     subject.readOnly = body.readOnly = !editable;
@@ -123,7 +136,7 @@ function renderInbox(card, profile, path) {
         await render();
       });
     }
-    if (!paused && draft.state === "pending") {
+    if (!paused && !stale && !followupClosed && draft.state === "pending") {
       for (const [label, decision] of [["Approve version", "approve"], ["Reject", "reject"]]) {
         action(actions, label, async () => {
           verifySaved();
@@ -132,7 +145,7 @@ function renderInbox(card, profile, path) {
         });
       }
     }
-    if (!paused && ["approved", "sending"].includes(draft.state)) {
+    if (!paused && !stale && !followupClosed && ["approved", "sending"].includes(draft.state)) {
       action(actions, draft.state === "sending" ? "Retry send" : "Send approved email", async () => {
         verifySaved();
         try {
@@ -145,9 +158,16 @@ function renderInbox(card, profile, path) {
       });
     }
   }
-  for (const reply of profile.replies) {
-    element("h3", "Incoming reply · " + labels[reply.intent], card);
-    element("pre", reply.body || "No plain-text body available.", card);
+  for (const incoming of profile.replies) {
+    element("h3", "Incoming reply · " + labels[incoming.intent], card);
+    element("pre", incoming.body || "No plain-text body available.", card);
+  }
+  if (canFollowUp) {
+    action(card, "Draft follow-up to latest reply", async () => {
+      await api(path + "/followups", "POST");
+      await render();
+      document.getElementById("prospect-" + profile.id)?.scrollIntoView();
+    });
   }
   if (!paused) {
     action(card, "Take over conversation", async () => {
@@ -169,6 +189,7 @@ function renderMeetings(card, profile, path) {
     element("p", "No meeting booked.", card);
     return;
   }
+  element("p", "Confirm the time with the prospect before booking.", card);
   const times = element("div", "", card);
   times.className = "actions";
   action(card, "Check calendar availability", async () => {

@@ -32,6 +32,17 @@ Open **Prospects**, enter a goal, and select **Find prospects**. Each run reques
 
 Review a match and select **Save to Prospects**. Each domain has one saved profile. The profile retains the evidence, publication dates, and unknowns. Select **Generate sourced draft** on the saved profile to open the pending draft in Inbox for review. The outgoing email requires approval of that version and a configured controlled mailbox.
 
+## Test the approved outreach and booking flow
+
+Use a private deployment with HTTPS and a workspace password. Configure Resend with a verified sender and receiving address. Set `CONTROLLED_RECIPIENT` to a mailbox you own, set `MAIL_FROM` and `MAIL_REPLY_TO`, and configure the `email.received` webhook on `/webhooks/email/inbound` with its `RESEND_WEBHOOK_SECRET`. Set the Google Calendar OAuth values in `.env.example` for a dedicated test calendar with free/busy and event write access.
+
+1. Research a company, save a match, and assign the controlled mailbox. Generate initial outreach, approve the exact draft, and send it.
+2. From the test mailbox, reply with “Let's schedule a call.” In Inbox, select **Draft follow-up to latest reply**, review the calendar options in the draft, approve it, and send.
+3. Reply with “The first option works” if that is the time you intend to test. In Meetings, check availability and book the agreed slot. Verify the event and brief in the dedicated calendar.
+4. In a separate fresh test workspace, reply “Please stop emailing me” and verify outreach is blocked. Use another fresh workspace to exercise the ambiguous-reply handoff.
+
+The follow-up templates cover meeting interest, pricing, and questions about automation. Other replies go to human review. The operator confirms the agreed meeting time in the calendar workflow.
+
 ## Deploy the demo on Render
 
 Use a Python web service connected to the `main` branch:
