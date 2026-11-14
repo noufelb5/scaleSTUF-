@@ -20,7 +20,7 @@ from pydantic import BaseModel, EmailStr, Field, ValidationError
 from sqlalchemy import Column, Integer, JSON, MetaData, String, Table, create_engine, select, update
 from svix.webhooks import Webhook, WebhookVerificationError
 
-from app import providers
+from app import providers, research
 
 load_dotenv()
 STATIC = Path(__file__).parent / "static"
@@ -28,6 +28,8 @@ engine = create_engine(os.getenv("DATABASE_URL", "sqlite:///ledgerwise.sqlite3")
 schema = MetaData()
 profiles = Table("profiles", schema, Column("id", String, primary_key=True),
                  Column("contact", String, unique=True), Column("record", JSON, nullable=False))
+research_runs = Table("research_runs", schema, Column("id", String, primary_key=True),
+                      Column("result", JSON, nullable=False))
 control = Table("workspace_control", schema, Column("id", Integer, primary_key=True),
                 Column("sequence", Integer, nullable=False))
 suppressions = Table("suppressions", schema, Column("address", String, primary_key=True))
@@ -73,7 +75,9 @@ def operator(request: Request, credentials: Annotated[HTTPBasicCredentials | Non
     if request.method in {"POST", "PUT", "PATCH"} and origin and origin != str(request.base_url).rstrip("/"):
         raise HTTPException(403, "Cross-origin workspace request.")
     password = os.getenv("WORKSPACE_PASSWORD")
-    if not password and not os.getenv("RESEND_API_KEY") and not os.getenv("GOOGLE_REFRESH_TOKEN") and not os.getenv("LANGFLOW_RUN_URL"):
+    if not password and not any(os.getenv(name) for name in (
+        "RESEND_API_KEY", "GOOGLE_REFRESH_TOKEN", "LANGFLOW_RUN_URL", "OPENAI_API_KEY",
+    )):
         return
     if (password and credentials and credentials.username == "ledgerwise"
             and compare_digest(credentials.password.encode(), password.encode())):
@@ -156,6 +160,54 @@ def companies():
     with engine.connect() as db:
         return [{"id": row.id, "contact": row.contact, **row.record}
                 for row in db.execute(select(profiles).order_by(profiles.c.id))]
+
+
+@app.post("/api/research", dependencies=operator_only)
+def run_research(data: research.ResearchRequest):
+    with engine.connect() as db:
+        domains = [row["domain"] for row in db.scalars(select(profiles.c.record))]
+    result = research.run(data, domains)
+    run_id = uuid4().hex
+    with engine.begin() as db:
+        db.execute(research_runs.insert().values(id=run_id, result=result))
+    return {"id": run_id, **result}
+
+
+@app.post("/api/research/{run_id}/prospects/{domain}", dependencies=operator_only)
+def save_research_prospect(run_id: str, domain: str):
+    # Use the stored result so the browser cannot supply qualification or evidence.
+    with transaction() as db:
+        result = db.scalar(select(research_runs.c.result).where(research_runs.c.id == run_id))
+        if result is None:
+            raise HTTPException(404, "Research run not found.")
+        candidate = next((item for item in result["candidates"] if item["domain"] == domain), None)
+        if candidate is None:
+            raise HTTPException(404, "Prospect not found in this research run.")
+        if candidate["fit"] != "match":
+            raise HTTPException(422, "Only prospects that match the core criteria can be saved.")
+
+        # The workspace lock serializes this check and insert on SQLite and PostgreSQL.
+        for row in db.execute(select(profiles)):
+            if row.record["domain"] == domain:
+                return {"id": row.id, "contact": row.contact, **row.record}
+
+        evidence = [
+            {
+                "id": uuid4().hex, "criterion": item["criterion"], "fact": item["finding"],
+                "url": item["url"], "excerpt": item["excerpt"], "source_date": item["source_date"],
+            }
+            for item in candidate["evidence"]
+        ]
+        record = {
+            "name": candidate["name"], "domain": domain, "website": candidate["website"],
+            "fit": candidate["fit"], "unknown": candidate["unknown"], "evidence": evidence,
+            "checked_on": result["checked_on"],
+            "timing": next((item["fact"] for item in evidence if item["criterion"] == "Recent timing"), None),
+            "drafts": [], "replies": [], "status": "research", "takeover": False, "booking": None,
+        }
+        company_id = uuid4().hex
+        db.execute(profiles.insert().values(id=company_id, record=record))
+        return {"id": company_id, "contact": None, **record}
 
 
 @app.put("/api/companies/{company_id}/contact", dependencies=operator_only)

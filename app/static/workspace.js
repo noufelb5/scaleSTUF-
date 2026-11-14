@@ -2,6 +2,9 @@ const workspace = document.querySelector("#workspace");
 const status = document.querySelector("#status");
 const navigation = [...document.querySelectorAll("nav button")];
 let view = "Prospects";
+let researchGoal = "Find US e-commerce brands that fit Ledgerwise's bookkeeping services.";
+let researchResult;
+let researchRunning = false;
 
 function element(tag, text, parent) {
   const node = document.createElement(tag);
@@ -44,6 +47,7 @@ function action(parent, label, callback) {
       button.disabled = false;
     }
   });
+  return button;
 }
 
 function field(parent, label, value, tag = "input") {
@@ -53,14 +57,21 @@ function field(parent, label, value, tag = "input") {
   return input;
 }
 
+function renderEvidence(card, evidence) {
+  element("p", evidence.criterion + " — " + (evidence.fact ?? evidence.finding), card);
+  element("blockquote", evidence.excerpt, card);
+  link(card, "Source · " + (evidence.source_date || "Publication date unavailable"), evidence.url);
+}
+
 function renderProspect(card, profile, path) {
-  element("p", profile.domain, card);
+  if (profile.website) link(card, profile.domain, profile.website);
+  else element("p", profile.domain, card);
   element("h3", "Fit and evidence", card);
-  for (const evidence of profile.evidence) {
-    element("p", evidence.fact, card);
-    link(card, "Source · " + evidence.source_date, evidence.url);
-  }
-  element("p", "Company size and revenue are unverified in this workspace.", card);
+  if (profile.fit) element("p", "Core fit: " + profile.fit, card);
+  if (profile.checked_on) element("p", "Checked on " + profile.checked_on, card);
+  for (const evidence of profile.evidence) renderEvidence(card, evidence);
+  if (profile.unknown?.length) element("p", "Unknown: " + profile.unknown.join(", "), card);
+  if (!profile.unknown) element("p", "Company size and revenue are unverified in this workspace.", card);
   element("p", "Recent timing signal: " + (profile.timing || "Unknown"), card);
   if (profile.contact) {
     element("p", "Controlled mailbox: " + profile.contact, card);
@@ -76,6 +87,7 @@ function renderProspect(card, profile, path) {
     action(card, "Generate sourced draft", async () => {
       await api(path + "/drafts", "POST");
       await switchTo("Inbox");
+      document.getElementById("prospect-" + profile.id)?.scrollIntoView();
     });
   }
 }
@@ -173,6 +185,54 @@ function renderMeetings(card, profile, path) {
   });
 }
 
+function renderResearch(profiles) {
+  const card = element("article", "", workspace);
+  element("h2", "Find prospects", card);
+  const goal = field(card, "Research goal", researchGoal);
+  goal.maxLength = 400;
+  goal.addEventListener("input", () => { researchGoal = goal.value; });
+  const progress = element("p", researchRunning ? "Searching public sources…" : "", card);
+  progress.setAttribute("role", "status");
+  const start = action(card, "Find prospects", async () => {
+    researchRunning = true;
+    progress.textContent = "Searching public sources…";
+    try {
+      researchResult = await api("/api/research", "POST", {goal: researchGoal});
+    } finally {
+      researchRunning = false;
+      if (view === "Prospects") await render();
+    }
+  });
+  start.disabled = researchRunning;
+
+  if (researchResult) {
+    const {id, candidates, web_actions, checked_on} = researchResult;
+    element("h3", "Latest research", card);
+    element("p", checked_on + " · " + web_actions + " web actions", card);
+    if (!candidates.length) element("p", "No new prospects with usable sources were found.", card);
+    for (const prospect of candidates) {
+      element("h4", prospect.name + " · " + prospect.fit, card);
+      link(card, prospect.domain, prospect.website);
+      for (const evidence of prospect.evidence) renderEvidence(card, evidence);
+      if (prospect.unknown.length) element("p", "Unknown: " + prospect.unknown.join(", "), card);
+      const saved = profiles.find(profile => profile.domain === prospect.domain);
+      if (saved) {
+        const anchor = element("a", "View saved prospect", card);
+        anchor.href = "#prospect-" + saved.id;
+      } else if (prospect.fit === "match") {
+        action(card, "Save " + prospect.name + " to Prospects", async () => {
+          const path = "/api/research/" + id + "/prospects/" + encodeURIComponent(prospect.domain);
+          const savedProspect = await api(path, "POST");
+          if (view === "Prospects") {
+            await render();
+            document.getElementById("prospect-" + savedProspect.id)?.scrollIntoView();
+          }
+        });
+      }
+    }
+  }
+}
+
 const screens = {Prospects: renderProspect, Inbox: renderInbox, Meetings: renderMeetings};
 
 async function render() {
@@ -180,8 +240,10 @@ async function render() {
   const profiles = await api("/api/companies");
   if (requested !== view) return;
   workspace.replaceChildren();
+  if (view === "Prospects") renderResearch(profiles);
   for (const profile of profiles) {
     const card = element("article", "", workspace);
+    card.id = "prospect-" + profile.id;
     element("h2", profile.name, card);
     screens[view](card, profile, "/api/companies/" + encodeURIComponent(profile.id));
   }
