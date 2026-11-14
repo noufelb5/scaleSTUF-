@@ -2,6 +2,9 @@ const workspace = document.querySelector("#workspace");
 const status = document.querySelector("#status");
 const navigation = [...document.querySelectorAll("nav button")];
 let view = "Prospects";
+let researchGoal = "Find US e-commerce brands that fit Ledgerwise's bookkeeping services.";
+let researchResult;
+let researchRunning = false;
 
 function element(tag, text, parent) {
   const node = document.createElement(tag);
@@ -44,6 +47,7 @@ function action(parent, label, callback) {
       button.disabled = false;
     }
   });
+  return button;
 }
 
 function field(parent, label, value, tag = "input") {
@@ -173,6 +177,44 @@ function renderMeetings(card, profile, path) {
   });
 }
 
+function renderResearch() {
+  const card = element("article", "", workspace);
+  element("h2", "Find prospects", card);
+  const goal = field(card, "Research goal", researchGoal);
+  goal.maxLength = 400;
+  goal.addEventListener("input", () => { researchGoal = goal.value; });
+  const progress = element("p", researchRunning ? "Searching public sources…" : "", card);
+  progress.setAttribute("role", "status");
+  const start = action(card, "Find prospects", async () => {
+    researchRunning = true;
+    progress.textContent = "Searching public sources…";
+    try {
+      researchResult = await api("/api/research", "POST", {goal: researchGoal});
+    } finally {
+      researchRunning = false;
+      if (view === "Prospects") await render();
+    }
+  });
+  start.disabled = researchRunning;
+
+  if (researchResult) {
+    const {candidates, web_actions, checked_on} = researchResult;
+    element("h3", "Latest research", card);
+    element("p", checked_on + " · " + web_actions + " web actions", card);
+    if (!candidates.length) element("p", "No new prospects with usable sources were found.", card);
+    for (const prospect of candidates) {
+      element("h4", prospect.name + " · " + prospect.fit, card);
+      link(card, prospect.domain, prospect.website);
+      for (const evidence of prospect.evidence) {
+        element("p", evidence.criterion + " — " + evidence.finding, card);
+        element("blockquote", evidence.excerpt, card);
+        link(card, "Source · " + (evidence.source_date || "Publication date unavailable"), evidence.url);
+      }
+      if (prospect.unknown.length) element("p", "Unknown: " + prospect.unknown.join(", "), card);
+    }
+  }
+}
+
 const screens = {Prospects: renderProspect, Inbox: renderInbox, Meetings: renderMeetings};
 
 async function render() {
@@ -180,6 +222,7 @@ async function render() {
   const profiles = await api("/api/companies");
   if (requested !== view) return;
   workspace.replaceChildren();
+  if (view === "Prospects") renderResearch();
   for (const profile of profiles) {
     const card = element("article", "", workspace);
     element("h2", profile.name, card);

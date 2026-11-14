@@ -20,7 +20,7 @@ from pydantic import BaseModel, EmailStr, Field, ValidationError
 from sqlalchemy import Column, Integer, JSON, MetaData, String, Table, create_engine, select, update
 from svix.webhooks import Webhook, WebhookVerificationError
 
-from app import providers
+from app import providers, research
 
 load_dotenv()
 STATIC = Path(__file__).parent / "static"
@@ -73,7 +73,9 @@ def operator(request: Request, credentials: Annotated[HTTPBasicCredentials | Non
     if request.method in {"POST", "PUT", "PATCH"} and origin and origin != str(request.base_url).rstrip("/"):
         raise HTTPException(403, "Cross-origin workspace request.")
     password = os.getenv("WORKSPACE_PASSWORD")
-    if not password and not os.getenv("RESEND_API_KEY") and not os.getenv("GOOGLE_REFRESH_TOKEN") and not os.getenv("LANGFLOW_RUN_URL"):
+    if not password and not any(os.getenv(name) for name in (
+        "RESEND_API_KEY", "GOOGLE_REFRESH_TOKEN", "LANGFLOW_RUN_URL", "OPENAI_API_KEY",
+    )):
         return
     if (password and credentials and credentials.username == "ledgerwise"
             and compare_digest(credentials.password.encode(), password.encode())):
@@ -156,6 +158,13 @@ def companies():
     with engine.connect() as db:
         return [{"id": row.id, "contact": row.contact, **row.record}
                 for row in db.execute(select(profiles).order_by(profiles.c.id))]
+
+
+@app.post("/api/research", dependencies=operator_only)
+def run_research(data: research.ResearchRequest):
+    with engine.connect() as db:
+        domains = [row["domain"] for row in db.scalars(select(profiles.c.record))]
+    return research.run(data, domains)
 
 
 @app.put("/api/companies/{company_id}/contact", dependencies=operator_only)

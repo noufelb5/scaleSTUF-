@@ -14,9 +14,9 @@ def setting(name):
     return value
 
 
-def request(method, url, *, missing_ok=False, **kwargs):
+def request(method, url, *, missing_ok=False, timeout=12, **kwargs):
     try:
-        response = httpx.request(method, url, timeout=12, **kwargs)
+        response = httpx.request(method, url, timeout=timeout, **kwargs)
         if missing_ok and response.status_code == 404:
             return None
         response.raise_for_status()
