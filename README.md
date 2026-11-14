@@ -30,7 +30,7 @@ Set `WORKSPACE_PASSWORD` and `OPENAI_API_KEY` in your local `.env` or private de
 
 Open **Prospects**, enter a goal, and select **Find prospects**. Each run requests up to three candidates from the dashboard, with a budget of up to 12 web tool calls. The results show fit, linked excerpts, and unknowns. A core fit requires sourced US operations and online sales. A bookkeeping need requires its own evidence. Review the excerpts against their sources before relying on them.
 
-Results are available in the dashboard session. Saving new candidates to the pipeline and drafting outreach for them are later steps.
+Review a match and select **Save to Prospects**. Each domain has one saved profile. The profile retains the evidence, publication dates, and unknowns. Select **Generate sourced draft** on the saved profile to open the pending draft in Inbox for review. The outgoing email requires approval of that version and a configured controlled mailbox.
 
 ## Deploy the demo on Render
 
