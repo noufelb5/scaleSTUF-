@@ -8,6 +8,15 @@ import httpx
 from fastapi import HTTPException
 
 
+def demo_mode():
+    return os.getenv("LEDGERWISE_DEMO") == "1"
+
+
+def require_live():
+    if demo_mode():
+        raise HTTPException(503, "Live provider actions are disabled in the simulated demo.")
+
+
 def setting(name):
     value = os.getenv(name)
     if not value:
@@ -16,6 +25,7 @@ def setting(name):
 
 
 def request(method, url, *, missing_ok=False, timeout=12, **kwargs):
+    require_live()
     try:
         response = httpx.request(method, url, timeout=timeout, **kwargs)
         if missing_ok and response.status_code == 404:
@@ -80,10 +90,10 @@ def sourced_draft(company, evidence):
         'Include the supporting evidence IDs, and use no placeholders.\n' + context
     )
     url = os.getenv("LANGFLOW_RUN_URL")
-    if not url:
+    if demo_mode() or not url:
         item = evidence[0]
         return {
-            "subject": f"An introduction to Ledgerwise for {company}",
+            "subject": f"An introduction to Ledgerwise for {company}"[:180],
             "body": (
                 f"Hi,\n\nI came across {company} while researching e-commerce brands. "
                 f"{item['fact']} Ledgerwise helps e-commerce teams with bookkeeping and "

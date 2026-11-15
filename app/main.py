@@ -332,6 +332,7 @@ def review_draft(company_id: str, draft_id: str, data: Review):
 
 @app.post("/api/companies/{company_id}/drafts/{draft_id}/send", dependencies=operator_only)
 def send_draft(company_id: str, draft_id: str):
+    providers.require_live()
     with transaction() as db:
         profile = load(db, company_id)
         draft = current_draft(profile, draft_id)
@@ -409,6 +410,7 @@ def followup_topic(reply):
 
 @app.post("/webhooks/email/inbound")
 async def receive_email(request: Request):
+    providers.require_live()
     raw = await request.body()
     try:
         event = Webhook(providers.setting("RESEND_WEBHOOK_SECRET")).verify(raw, dict(request.headers))
@@ -486,6 +488,7 @@ def slots(company_id: str):
 
 
 def available_slots():
+    providers.require_live()
     candidates = list(candidate_slots(datetime.now(UTC)))
     duration = timedelta(minutes=30)
     busy = providers.Calendar().busy(candidates[0], candidates[-1] + duration)
@@ -494,6 +497,7 @@ def available_slots():
 
 @app.post("/api/companies/{company_id}/bookings", dependencies=operator_only)
 def book(company_id: str, slot: Slot):
+    providers.require_live()
     if slot.start.utcoffset() is None:
         raise HTTPException(422, "Supply a timezone with the selected slot.")
     start = slot.start.astimezone(UTC)

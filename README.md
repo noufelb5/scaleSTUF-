@@ -22,7 +22,7 @@ Open http://127.0.0.1:8000. The workspace username is `ledgerwise`. Set a local 
 2. Generate and inspect the sourced draft.
 3. Review how the app tracks prospect status and human review.
 
-Do not send email or book a real meeting from this demo. With provider credentials unset, email sending, inbound email processing, and calendar availability or booking are unavailable.
+With `LEDGERWISE_DEMO=1`, the app uses local draft templates and blocks live research, email, and calendar actions.
 
 ## Run live prospect research
 
@@ -53,6 +53,10 @@ Use a Python web service connected to the `main` branch:
 - Set `LEDGERWISE_DEMO=1` and a strong `WORKSPACE_PASSWORD` in Render's Environment settings.
 
 Keep all provider settings empty in the demo deployment. Do not add Resend, Google Calendar, Langflow, or OpenAI credentials. The app reads those settings to access external services; leaving them unset keeps those integrations unavailable. Enter passwords and other secrets only in the local `.env` file or the hosting provider's secret settings. Never commit `.env` or share secret values in screenshots, chat, or source files. The repository's `.gitignore` excludes `.env`.
+
+## Repeat the local verification
+
+From the repository root, run `python -m unittest discover -s tests -v` with the project dependencies installed. The suite uses temporary SQLite databases and simulated provider responses. It covers research through booking and checks that demo mode makes zero external requests.
 
 ## Health check
 

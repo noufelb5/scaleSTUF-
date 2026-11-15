@@ -52,8 +52,7 @@ def source_url(url):
 
 
 def run(data: ResearchRequest, known_domains: list[str]):
-    if os.getenv("LEDGERWISE_DEMO") == "1":
-        raise HTTPException(503, "Live prospect research is disabled in the simulated demo.")
+    providers.require_live()
     key = providers.setting("OPENAI_API_KEY")
     today = datetime.now(UTC).date()
     response = providers.request(
